@@ -1,0 +1,2 @@
+# Templates land on Linux hosts; a CRLF in wsl.conf or a unit file breaks them.
+* text=auto eol=lf
