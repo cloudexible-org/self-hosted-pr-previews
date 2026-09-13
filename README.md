@@ -79,7 +79,11 @@ templates/host/           WSL, Docker, Tailscale and keepalive files
 templates/proxy/          Traefik + dashboard compose file
 templates/workflows/      a project's preview.yml
 apps/dashboard/           the preview dashboard (Go)
+articles/                 the story behind this setup
 ```
+
+The longer story — why this exists and what went wrong along the way — is in
+[`articles/replacing-paid-preview-deployments.md`](articles/replacing-paid-preview-deployments.md).
 
 ## Requirements
 
