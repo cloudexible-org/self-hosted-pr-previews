@@ -1,0 +1,177 @@
+name: Preview
+
+# One private preview per pull request on the shared preview host, at
+# https://pr-<number>.<PREVIEW_DOMAIN>, with its own backend preview.
+#
+# Reference template — copy to `.github/workflows/preview.yml` in the project and
+# fill the `env` block from config.yaml (projects[]). The Doppler and Convex parts
+# are marked; replace or delete them to match projects[].secrets and
+# projects[].backend. docs/07-project-workflow.md explains every step.
+on:
+  pull_request:
+    types: [opened, synchronize, reopened, closed]
+
+# A newer push supersedes a build still in flight; closing the PR cancels one.
+concurrency:
+  group: preview-${{ github.event.pull_request.number }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+  deployments: write
+
+env:
+  # projects[].name — container, router and service names are global on the
+  # shared host, so every one of them carries this prefix.
+  PROJECT: myapp
+  # projects[].preview_domain
+  PREVIEW_DOMAIN: preview.myapp.com
+  # projects[].app
+  DOCKERFILE: apps/web/Dockerfile
+  APP_PORT: "3000"
+  PR: ${{ github.event.pull_request.number }}
+
+jobs:
+  deploy:
+    name: deploy preview
+    # Same-repository PRs only: code from a fork must never reach a self-hosted
+    # runner. Dependabot runs get no environment secrets, so they could only fail.
+    if: >-
+      github.event.action != 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository &&
+      github.event.pull_request.user.login != 'dependabot[bot]'
+    runs-on:
+      # github.runners[].runner_group — or `labels` alone for a repo-level runner.
+      group: previews
+      # `linux` keeps a Windows runner added to the group from taking bash steps.
+      labels: [self-hosted, linux]
+    environment:
+      name: preview
+      url: https://pr-${{ github.event.pull_request.number }}.${{ env.PREVIEW_DOMAIN }}
+    timeout-minutes: 30
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v7
+
+      - name: Install pnpm
+        uses: pnpm/action-setup@v6
+        with:
+          # Per job, not ~/setup-pnpm: two runners under one user would race on it.
+          dest: ${{ runner.temp }}/setup-pnpm
+
+      - name: Setup Node
+        uses: actions/setup-node@v7
+        with:
+          node-version: 24
+          cache: pnpm
+
+      - name: Install dependencies
+        run: pnpm install --frozen-lockfile
+
+      # ── secrets.manager: doppler ──────────────────────────────────────────
+      - name: Install Doppler CLI
+        uses: dopplerhq/cli-action@v4
+
+      # ── backend.kind: convex ──────────────────────────────────────────────
+      # `convex deploy` claims (or reuses) the PR's backend preview, runs `--cmd`
+      # with its URL in PUBLIC_BACKEND_URL (projects[].backend.url_env_var), then
+      # pushes the functions — so a failed image build never pushes. The seed runs
+      # only when this deploy *created* the preview.
+      #
+      # The image is labelled with that URL: teardown needs the deployment's name
+      # to delete it, and a preview deploy key cannot look one up by PR number.
+      #
+      # Without a backend, replace this step with a plain `docker build` carrying
+      # the same tag.
+      - name: Deploy the backend preview and build the image
+        working-directory: packages/backend
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN_BACKEND }}
+        run: |
+          doppler run -- npx convex deploy \
+            --preview-name "pr-$PR" \
+            --preview-run seed/preview:apply \
+            --cmd-url-env-var-name PUBLIC_BACKEND_URL \
+            --cmd 'docker build --file "$GITHUB_WORKSPACE/$DOCKERFILE" --tag "$PROJECT-preview:pr-$PR" --label preview.convex-url="$PUBLIC_BACKEND_URL" --build-arg PUBLIC_BACKEND_URL --build-arg PUBLIC_APP_URL="https://pr-$PR.$PREVIEW_DOMAIN" "$GITHUB_WORKSPACE"'
+
+      # Every variable in the web app's Doppler `preview` config reaches the
+      # container, minus Doppler's own DOPPLER_* metadata. Downloading into a
+      # variable first makes a bad token fail the step instead of starting a
+      # container with no secrets. Branch names are untrusted input, so they
+      # arrive through env, never inline.
+      - name: Start the preview container
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN_WEB }}
+          BRANCH: ${{ github.head_ref }}
+          SHA: ${{ github.event.pull_request.head.sha }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          NAME="$PROJECT-pr-$PR"
+          web_env="$(doppler secrets download --no-file --format docker)"
+          docker rm --force "$NAME" 2>/dev/null || true
+          docker run --detach \
+            --name "$NAME" \
+            --network previews \
+            --restart unless-stopped \
+            --env-file <(grep -v '^DOPPLER_' <<<"$web_env") \
+            --label traefik.enable=true \
+            --label "traefik.http.routers.$NAME.rule=Host(\`pr-$PR.$PREVIEW_DOMAIN\`)" \
+            --label "traefik.http.routers.$NAME.entrypoints=websecure" \
+            --label "traefik.http.routers.$NAME.tls.certresolver=acme" \
+            --label "traefik.http.routers.$NAME.tls.domains[0].main=*.$PREVIEW_DOMAIN" \
+            --label "traefik.http.services.$NAME.loadbalancer.server.port=$APP_PORT" \
+            --label "preview.project=$PROJECT" \
+            --label "preview.pr=$PR" \
+            --label "preview.repo=$GITHUB_REPOSITORY" \
+            --label "preview.branch=$BRANCH" \
+            --label "preview.sha=$SHA" \
+            --label "preview.run-url=$RUN_URL" \
+            "$PROJECT-preview:pr-$PR"
+          # Drop the previous build of this PR, now untagged.
+          docker image prune --force
+
+  teardown:
+    name: remove preview
+    if: >-
+      github.event.action == 'closed' &&
+      github.event.pull_request.head.repo.full_name == github.repository
+    runs-on:
+      group: previews
+      labels: [self-hosted, linux]
+    # For the Doppler token that reads the backend's preview deploy key.
+    environment:
+      name: preview
+    steps:
+      - name: Install Doppler CLI
+        uses: dopplerhq/cli-action@v4
+
+      # The image goes last: if deleting the backend preview fails, the image
+      # survives with its label and re-running this job retries. An image built
+      # without the label leaves its backend preview to the provider's expiry.
+      - name: Remove the container, the backend preview and the image
+        env:
+          DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN_BACKEND }}
+        run: |
+          NAME="$PROJECT-pr-$PR"
+          IMAGE="$PROJECT-preview:pr-$PR"
+          url="$(docker image inspect "$IMAGE" --format '{{ index .Config.Labels "preview.convex-url" }}' 2>/dev/null || true)"
+          docker rm --force "$NAME" 2>/dev/null || true
+
+          # ── backend.kind: convex ──────────────────────────────────────────
+          host="${url#https://}"
+          name="${host%%.convex.cloud*}"
+          if [ -z "$url" ] || [ "$name" = "$host" ]; then
+            echo "No backend URL on the image; leaving the preview deployment to expire."
+          else
+            key="$(doppler secrets get CONVEX_DEPLOY_KEY --plain)"
+            echo "::add-mask::$key"
+            api="https://api.convex.dev/v1/deployments/$name"
+            # Read-only first, so a key the API refuses fails before any delete.
+            curl --fail-with-body --silent --show-error -H "Authorization: Bearer $key" "$api"
+            echo
+            curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $key" "$api/delete"
+            echo
+            echo "Deleted backend preview $name."
+          fi
+
+          docker image rm "$IMAGE" 2>/dev/null || true

@@ -1,0 +1,9 @@
+# /etc/default/tailscaled on the preview host.
+PORT="41641"
+
+# Only when access.tailscale.userspace_networking is true: every WSL2 distro
+# shares one network namespace, so if another distro already runs tailscaled it
+# owns `tailscale0` and a second kernel TUN device fails to start. Userspace
+# mode creates no device and still hands inbound tailnet connections to local
+# listeners — Traefik on :443.
+FLAGS="--tun=userspace-networking"

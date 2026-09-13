@@ -1,0 +1,32 @@
+{{define "logs"}}{{template "head" (printf "%s · logs" .Container.Name)}}
+<div class="logs-page">
+  <header class="bar">
+    <a class="back" href="/">← Previews</a>
+    <h1 class="mono">{{.Container.Name}}</h1>
+    <div class="facts">
+      <span><span class="state state-{{.Container.State}}"></span>{{.Container.Status}}</span>
+      {{with .Preview}}
+        {{with .URL}}<a href="{{.}}" target="_blank" rel="noopener">{{.}}</a>{{end}}
+        {{if .PRURL}}<a href="{{.PRURL}}" target="_blank" rel="noopener">PR #{{.PR}}</a>{{end}}
+        {{with .Branch}}<span class="chip">{{.}}</span>{{end}}
+        {{with .RunURL}}<a href="{{.}}" target="_blank" rel="noopener">Build log</a>{{end}}
+      {{end}}
+    </div>
+  </header>
+  <div class="toolbar">
+    <label>Lines
+      <select id="tail">
+        {{range .Tails}}<option value="{{.}}"{{if eq . $.Tail}} selected{{end}}>{{.}}</option>{{end}}
+      </select>
+    </label>
+    <input id="filter" type="search" placeholder="Filter lines" autocomplete="off" aria-label="Filter lines">
+    <label class="check"><input id="follow" type="checkbox" checked> Follow</label>
+    <label class="check"><input id="wrap" type="checkbox"> Wrap</label>
+    <span id="status" class="muted" role="status"></span>
+    <button id="reconnect" class="btn" type="button" hidden>Reload log</button>
+  </div>
+  <div id="log" class="log" data-stream="/logs/{{.Container.Name}}/stream" tabindex="0"></div>
+</div>
+</body>
+</html>
+{{end}}

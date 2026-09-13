@@ -1,0 +1,59 @@
+{{define "index"}}{{template "head" "Previews · preview-host"}}
+<header class="bar">
+  <h1>Previews</h1>
+  <p class="sub">Pull-request environments on <span class="mono">preview-host</span></p>
+</header>
+<main id="overview" data-refresh="/?partial=1">
+{{template "list" .}}
+</main>
+</body>
+</html>
+{{end}}
+
+{{define "list"}}
+{{if .Err}}<p class="notice error">Couldn't read from Docker: {{.Err}}</p>{{end}}
+{{range .Projects}}
+<section class="project">
+  <h2>{{.Name}} <span class="count">{{len .Previews}}</span></h2>
+  <ul class="cards">
+    {{range .Previews}}
+    <li class="card">
+      <div class="card-main">
+        <span class="state state-{{.State}}" title="{{.Status}}"></span>
+        {{if .PRURL}}<a class="pr" href="{{.PRURL}}" target="_blank" rel="noopener">#{{.PR}}</a>{{else}}<strong class="pr">#{{.PR}}</strong>{{end}}
+        {{with .Branch}}<span class="chip">{{.}}</span>{{end}}
+        {{if .CommitURL}}<a class="chip" href="{{.CommitURL}}" target="_blank" rel="noopener">{{.ShortSHA}}</a>{{else if .SHA}}<span class="chip">{{.ShortSHA}}</span>{{end}}
+      </div>
+      <div class="card-meta">
+        <span>{{.Status}}</span>
+        {{with .URL}}<a href="{{.}}" target="_blank" rel="noopener" class="mono">{{.}}</a>{{end}}
+      </div>
+      <div class="card-actions">
+        {{with .URL}}<a class="btn primary" href="{{.}}" target="_blank" rel="noopener">Open</a>{{end}}
+        <a class="btn" href="/logs/{{.Name}}">Logs</a>
+        {{with .RunURL}}<a class="btn" href="{{.}}" target="_blank" rel="noopener">Build log</a>{{end}}
+      </div>
+    </li>
+    {{end}}
+  </ul>
+</section>
+{{else}}
+{{if not .Err}}<p class="notice">No previews are running. A pull request gets one when its preview workflow deploys.</p>{{end}}
+{{end}}
+{{with .Services}}
+<section class="project">
+  <h2>Host services</h2>
+  <ul class="services">
+    {{range .}}
+    <li>
+      <span class="state state-{{.State}}" title="{{.State}}"></span>
+      <span class="svc">{{index .Labels "com.docker.compose.service"}}</span>
+      <span class="muted">{{.Status}}</span>
+      <a class="btn" href="/logs/{{.Name}}">Logs</a>
+    </li>
+    {{end}}
+  </ul>
+</section>
+{{end}}
+<p class="updated muted">Updated <time data-local datetime="{{.Updated.Format "2006-01-02T15:04:05Z07:00"}}">{{.Updated.Format "15:04:05 MST"}}</time> · refreshes every 10 seconds</p>
+{{end}}

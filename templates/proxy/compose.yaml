@@ -1,0 +1,93 @@
+# The shared proxy on the preview host: one Traefik in front of every project's
+# pull-request previews, the dashboard listing them, and a read-only Docker API
+# for the dashboard. Deploy from this directory with the values from .env:
+#
+#   docker network create previews          # once — proxy.network
+#   docker compose up --detach --build
+#
+# docs/05-proxy-and-certificates.md and docs/11-dashboard.md explain each part.
+name: preview-host
+
+services:
+  traefik:
+    image: traefik:v3.7
+    restart: unless-stopped
+    command:
+      - --providers.docker=true
+      # Only containers that opt in with `traefik.enable=true` are routed.
+      - --providers.docker.exposedbydefault=false
+      - --providers.docker.network=previews
+      # proxy.entrypoint
+      - --entrypoints.websecure.address=:443
+      # Preview certificates: Let's Encrypt over DNS-01 (no public port needed).
+      # Each project delegates its challenge record into
+      # certificates.challenge_delegation_zone, which is the only zone the
+      # token below can edit. Projects name their own wildcard in container
+      # labels, so nothing project-specific is configured here.
+      - --entrypoints.websecure.http.tls.certresolver=acme
+      - --certificatesresolvers.acme.acme.email=${ACME_EMAIL:?set ACME_EMAIL in .env}
+      - --certificatesresolvers.acme.acme.storage=/letsencrypt/acme.json
+      - --certificatesresolvers.acme.acme.dnschallenge.provider=cloudflare
+      # The dashboard's certificate, for the host's own tailnet name, comes from
+      # the local tailscaled. Drop this (and the mount below) without a dashboard.
+      - --certificatesresolvers.tailscale.tailscale=true
+    environment:
+      CF_DNS_API_TOKEN: ${CF_DNS_API_TOKEN:?set CF_DNS_API_TOKEN in .env}
+    ports:
+      - "443:443"
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+      # The directory, not the socket file: tailscaled recreates the socket when
+      # it restarts, and at boot Docker may start Traefik before the socket
+      # exists — mounting the file would make Docker create a directory there.
+      - /var/run/tailscale:/var/run/tailscale
+      - letsencrypt:/letsencrypt
+    networks:
+      - previews
+
+  dashboard:
+    build: ../../apps/dashboard
+    image: preview-dashboard
+    restart: unless-stopped
+    environment:
+      DOCKER_HOST: http://docker-proxy:2375
+      # This compose project, whose services the dashboard lists beside previews.
+      INFRA_PROJECT: preview-host
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.preview-dashboard.rule=Host(`${DASHBOARD_HOST:?set DASHBOARD_HOST in .env}`)
+      - traefik.http.routers.preview-dashboard.entrypoints=websecure
+      - traefik.http.routers.preview-dashboard.tls.certresolver=tailscale
+      - traefik.http.services.preview-dashboard.loadbalancer.server.port=8080
+    read_only: true
+    cap_drop: [ALL]
+    security_opt: [no-new-privileges:true]
+    depends_on: [docker-proxy]
+    networks:
+      - previews
+      - docker-api
+
+  # The Docker API reduced to reading containers. The socket itself would let
+  # whoever holds it take over the host.
+  docker-proxy:
+    image: tecnativa/docker-socket-proxy:v0.5.0
+    restart: unless-stopped
+    environment:
+      CONTAINERS: 1
+    volumes:
+      - /var/run/docker.sock:/var/run/docker.sock:ro
+    networks:
+      - docker-api
+
+networks:
+  # Shared with every preview container. Created by hand, so it outlives this
+  # compose project.
+  previews:
+    external: true
+  # The dashboard's own line to the Docker API proxy. Previews run pull-request
+  # code, so they must not be able to reach it.
+  docker-api:
+    internal: true
+
+volumes:
+  letsencrypt:

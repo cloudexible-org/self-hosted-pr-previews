@@ -1,0 +1,11 @@
+# %USERPROFILE%\.wslconfig on the Windows machine (host.kind: wsl2).
+# Applies to the whole WSL VM, i.e. every distro. Takes effect after `wsl --shutdown`.
+
+[wsl2]
+# host.wsl_memory — preview builds are memory-hungry; cap them so Windows stays usable.
+memory=20GB
+
+[experimental]
+# Hand the Linux file cache (mostly Docker builds) back to Windows over time,
+# instead of holding it until the VM shuts down.
+autoMemoryReclaim=gradual

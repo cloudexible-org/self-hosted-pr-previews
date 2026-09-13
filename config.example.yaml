@@ -1,0 +1,109 @@
+# Everything specific to one setup lives here. Copy to `config.yaml` (gitignored)
+# and fill it in — or let your agent do it: AGENTS.md has it interview you,
+# write this file, and then follow docs/ in order using these values.
+#
+# Every runbook and template refers back to keys in this file by path, e.g.
+# `projects[].preview_domain`. Nothing in docs/ or templates/ should need editing
+# by hand once this is right.
+
+# ─── The machine that builds and serves previews ─────────────────────────────
+host:
+  # wsl2  — a dedicated WSL2 distro on a Windows machine (what this repo was
+  #         built on; see docs/01-host.md for why "dedicated" matters)
+  # linux — a Linux machine or VM you control
+  kind: wsl2
+  # wsl2 only: the distro to create for the preview host.
+  wsl_distro: preview-host
+  wsl_image: Ubuntu-24.04
+  # The non-root user that runs the GitHub runner and owns Docker access.
+  user: runner
+  # wsl2 only: memory cap for the WSL VM (all distros share one VM).
+  wsl_memory: 20GB
+
+# ─── Who can reach previews ──────────────────────────────────────────────────
+access:
+  # tailscale — previews are private: reachable only from your tailnet
+  #             (the path this repo documents; docs/04-private-network.md)
+  # public    — previews are on the internet; put your own auth in front
+  mode: tailscale
+  tailscale:
+    # The tailnet machine name the preview host joins as.
+    node_name: preview-host
+    # true when another WSL distro on the same machine already runs tailscaled
+    # (they share one network namespace — docs/pitfalls.md#wsl-shares-one-network).
+    userspace_networking: true
+    # Logins allowed HTTPS to the preview host. Everyone else on the tailnet is
+    # denied by the access policy in docs/04-private-network.md.
+    testers:
+      - teammate@example.com
+
+# ─── GitHub runner ───────────────────────────────────────────────────────────
+github:
+  # One runner registration per org (or repo). A single host can run several.
+  runners:
+    - owner: my-org            # org or user that owns the repos
+      scope: org               # org | repo
+      repo: null               # repo name when scope is repo
+      runner_group: previews   # org runners only; needs a plan with runner groups
+      runner_name: preview-host
+      labels: [docker, previews]
+
+# ─── HTTPS certificates ──────────────────────────────────────────────────────
+certificates:
+  acme_email: you@example.com
+  # The DNS provider hosting the delegation zone below. docs/05 covers Cloudflare.
+  dns_provider: cloudflare
+  # A zone you own that holds nothing important, used only for ACME DNS-01
+  # challenges. Each project's zone gets one CNAME pointing into it, so the
+  # host's API token never touches a project's own DNS — even across accounts.
+  challenge_delegation_zone: example-infra.net
+
+# ─── Shared proxy and dashboard ──────────────────────────────────────────────
+proxy:
+  # Docker network every preview container joins.
+  network: previews
+  entrypoint: websecure
+  cert_resolver: acme
+dashboard:
+  enabled: true
+  # Served on the host's own tailnet name, with Tailscale's certificate.
+  host: preview-host.your-tailnet.ts.net
+
+# ─── Secrets ─────────────────────────────────────────────────────────────────
+secrets:
+  # doppler — one read-only service token per project config, stored as GitHub
+  #           environment secrets (docs/08-secrets.md)
+  # github  — plain GitHub environment secrets
+  manager: doppler
+  github_environment: preview
+
+# ─── Projects that get previews ──────────────────────────────────────────────
+projects:
+  - name: myapp                       # prefixes container/router names on the shared host
+    repo: my-org/myapp
+    base_domain: myapp.com
+    preview_domain: preview.myapp.com # previews at pr-<number>.preview.myapp.com
+    # How the image is built. One app per project is previewed; add entries for more.
+    app:
+      dockerfile: apps/web/Dockerfile
+      port: 3000
+      # Values baked in at build time per PR (public URLs, public keys).
+      build_args: [PUBLIC_APP_URL, PUBLIC_BACKEND_URL]
+    secrets:
+      doppler:
+        web: myapp_web                # runtime secrets for the container
+        backend: myapp_api            # e.g. the backend's preview deploy key
+        config: preview
+    # Per-PR backend. none | convex (docs/09-backend-previews.md)
+    backend:
+      kind: convex
+      working_directory: packages/backend
+      seed_function: seed/preview:apply
+      # The env var the frontend build reads the backend URL from.
+      url_env_var: PUBLIC_BACKEND_URL
+    # Where sign-in redirects must be allowed. none | workos | clerk (docs/10-auth.md)
+    auth:
+      provider: workos
+    # Hosting that also builds PR branches and must stop doing so once PRs are
+    # previewed here (docs/pitfalls.md#vercel-still-builds-pr-branches).
+    other_hosting: vercel

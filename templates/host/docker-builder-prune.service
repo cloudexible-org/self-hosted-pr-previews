@@ -1,0 +1,12 @@
+# /etc/systemd/system/docker-builder-prune.service
+[Unit]
+Description=Drop Docker build cache older than three days
+Requires=docker.service
+After=docker.service
+
+[Service]
+Type=oneshot
+# --all, because without it only dangling records go — tens of gigabytes can
+# survive. An age filter rather than --max-used-space, which removes nothing on
+# Docker 29's default docker driver.
+ExecStart=/usr/bin/docker builder prune --all --force --filter until=72h

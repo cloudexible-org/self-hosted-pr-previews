@@ -1,0 +1,4 @@
+# Your filled-in configuration and secrets stay on your machine.
+config.yaml
+.env
+*.local
