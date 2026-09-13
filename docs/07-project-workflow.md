@@ -79,7 +79,16 @@ What the workflow guarantees, and must keep guaranteeing after edits:
   replaced after the image and backend deploy succeed.
 - **Branch names are untrusted.** They reach shell only through `env:`.
 - **Teardown removes everything** on close or merge — container, backend preview,
-  then image.
+  then image — and a daily run tears down any preview whose PR closed while the
+  host was down.
+- **One preview can't starve the host.** The container gets `--memory`, `--cpus`
+  and `--pids-limit` (`app.memory`, `app.cpus`). Size them from
+  `docker stats` on a running preview, with headroom; a server-rendered app
+  needs far more than a static bundle behind a small web server.
+
+Copy [`templates/workflows/preview-health.yml`](../templates/workflows/preview-health.yml)
+next to it, with `WILDCARD` set to `*.<preview_domain>`
+([12](12-operations.md#monitoring)).
 
 ## 4. Create the GitHub environment
 

@@ -1,0 +1,41 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  dashboard:
+    name: dashboard
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # The image build runs `go vet` and the tests before compiling.
+      - name: Build the image
+        run: docker build apps/dashboard
+
+  templates:
+    name: templates
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v7
+
+      # Also runs shellcheck over every `run:` script.
+      - name: Lint the workflow templates
+        run: |
+          bash <(curl --fail --silent --show-error --location https://raw.githubusercontent.com/rhysd/actionlint/main/scripts/download-actionlint.bash)
+          ./actionlint -color templates/workflows/*.yml .github/workflows/*.yml
+
+      # The template requires these, and .env.example leaves them blank.
+      - name: Validate the proxy compose file
+        working-directory: templates/proxy
+        env:
+          ACME_EMAIL: ci@example.com
+          CF_DNS_API_TOKEN: placeholder
+          DASHBOARD_HOST: preview-host.example-tailnet.ts.net
+        run: docker compose config --quiet

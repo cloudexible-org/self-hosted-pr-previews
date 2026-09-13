@@ -1,7 +1,9 @@
 name: Preview
 
 # One private preview per pull request on the shared preview host, at
-# https://pr-<number>.<PREVIEW_DOMAIN>, with its own backend preview.
+# https://pr-<number>.<PREVIEW_DOMAIN>, with its own backend preview. A daily run
+# removes previews whose pull request closed without a teardown, and is the
+# heartbeat preview-health.yml watches.
 #
 # Reference template — copy to `.github/workflows/preview.yml` in the project and
 # fill the `env` block from config.yaml (projects[]). The Doppler and Convex parts
@@ -10,10 +12,13 @@ name: Preview
 on:
   pull_request:
     types: [opened, synchronize, reopened, closed]
+  schedule:
+    - cron: "17 3 * * *"
+  workflow_dispatch:
 
 # A newer push supersedes a build still in flight; closing the PR cancels one.
 concurrency:
-  group: preview-${{ github.event.pull_request.number }}
+  group: preview-${{ github.event.pull_request.number || 'cleanup' }}
   cancel-in-progress: true
 
 permissions:
@@ -29,6 +34,8 @@ env:
   # projects[].app
   DOCKERFILE: apps/web/Dockerfile
   APP_PORT: "3000"
+  APP_MEMORY: 1g
+  APP_CPUS: "1"
   PR: ${{ github.event.pull_request.number }}
 
 jobs:
@@ -37,6 +44,7 @@ jobs:
     # Same-repository PRs only: code from a fork must never reach a self-hosted
     # runner. Dependabot runs get no environment secrets, so they could only fail.
     if: >-
+      github.event_name == 'pull_request' &&
       github.event.action != 'closed' &&
       github.event.pull_request.head.repo.full_name == github.repository &&
       github.event.pull_request.user.login != 'dependabot[bot]'
@@ -88,6 +96,9 @@ jobs:
         env:
           DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN_BACKEND }}
         run: |
+          # --cmd is single-quoted on purpose: convex deploy expands it, after
+          # setting PUBLIC_BACKEND_URL.
+          # shellcheck disable=SC2016
           doppler run -- npx convex deploy \
             --preview-name "pr-$PR" \
             --preview-run seed/preview:apply \
@@ -99,6 +110,10 @@ jobs:
       # variable first makes a bad token fail the step instead of starting a
       # container with no secrets. Branch names are untrusted input, so they
       # arrive through env, never inline.
+      #
+      # The limits keep one preview from starving the host, which other previews,
+      # builds and — on a desktop — you share. A preview short of memory shows up
+      # as a restarting container (`OOMKilled` in `docker inspect`).
       - name: Start the preview container
         env:
           DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN_WEB }}
@@ -113,6 +128,9 @@ jobs:
             --name "$NAME" \
             --network previews \
             --restart unless-stopped \
+            --memory "$APP_MEMORY" \
+            --cpus "$APP_CPUS" \
+            --pids-limit 1024 \
             --env-file <(grep -v '^DOPPLER_' <<<"$web_env") \
             --label traefik.enable=true \
             --label "traefik.http.routers.$NAME.rule=Host(\`pr-$PR.$PREVIEW_DOMAIN\`)" \
@@ -130,24 +148,66 @@ jobs:
           # Drop the previous build of this PR, now untagged.
           docker image prune --force
 
+  # A preview outlives its pull request when teardown never ran — typically
+  # because the host was down when the PR closed, and GitHub drops a job still
+  # queued after 24 hours. Once a day this lists the pull requests that have an
+  # image or container on the host but are no longer open.
+  stale:
+    name: find stale previews
+    if: github.event_name != 'pull_request'
+    runs-on:
+      group: previews
+      labels: [self-hosted, linux]
+    permissions:
+      pull-requests: read
+    outputs:
+      prs: ${{ steps.find.outputs.prs }}
+    steps:
+      - name: Compare previews on the host with open pull requests
+        id: find
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          # One page of open PRs; raise it, or paginate, past 100.
+          open="$(curl --fail-with-body --silent --show-error -H "Authorization: Bearer $GH_TOKEN" \
+            "$GITHUB_API_URL/repos/$GITHUB_REPOSITORY/pulls?state=open&per_page=100" | jq -c 'map(.number)')"
+          here="$( {
+            docker image ls "$PROJECT-preview" --format '{{.Tag}}' | sed -n 's/^pr-\([0-9][0-9]*\)$/\1/p'
+            docker ps --all --filter "label=preview.project=$PROJECT" --format '{{.Label "preview.pr"}}'
+          } | { grep -E '^[0-9]+$' || true; } | jq -sc 'unique')"
+          prs="$(jq -nc --argjson here "$here" --argjson open "$open" '$here - $open')"
+          echo "On the host: $here. Open: $open. Stale: $prs."
+          echo "prs=$prs" >> "$GITHUB_OUTPUT"
+
+  # For the closed pull request, or for each stale one the daily run found.
   teardown:
     name: remove preview
+    needs: stale
     if: >-
-      github.event.action == 'closed' &&
-      github.event.pull_request.head.repo.full_name == github.repository
+      !cancelled() && (
+        (github.event.action == 'closed' && github.event.pull_request.head.repo.full_name == github.repository) ||
+        (needs.stale.result == 'success' && needs.stale.outputs.prs != '[]')
+      )
+    strategy:
+      fail-fast: false
+      matrix:
+        pr: ${{ fromJSON(github.event_name == 'pull_request' && format('[{0}]', github.event.pull_request.number) || needs.stale.outputs.prs || '[0]') }}
     runs-on:
       group: previews
       labels: [self-hosted, linux]
     # For the Doppler token that reads the backend's preview deploy key.
     environment:
       name: preview
+    env:
+      PR: ${{ matrix.pr }}
     steps:
       - name: Install Doppler CLI
         uses: dopplerhq/cli-action@v4
 
       # The image goes last: if deleting the backend preview fails, the image
-      # survives with its label and re-running this job retries. An image built
-      # without the label leaves its backend preview to the provider's expiry.
+      # survives with its label, and re-running this job — or the next daily run —
+      # retries. An image built without the label leaves its backend preview to
+      # the provider's expiry.
       - name: Remove the container, the backend preview and the image
         env:
           DOPPLER_TOKEN: ${{ secrets.DOPPLER_TOKEN_BACKEND }}
@@ -167,11 +227,23 @@ jobs:
             echo "::add-mask::$key"
             api="https://api.convex.dev/v1/deployments/$name"
             # Read-only first, so a key the API refuses fails before any delete.
-            curl --fail-with-body --silent --show-error -H "Authorization: Bearer $key" "$api"
-            echo
-            curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $key" "$api/delete"
-            echo
-            echo "Deleted backend preview $name."
+            # A deployment that is already gone (expired, or deleted by hand)
+            # needs nothing more.
+            status="$(curl --silent --show-error --output /dev/null --write-out '%{http_code}' -H "Authorization: Bearer $key" "$api")"
+            case "$status" in
+              200)
+                curl --fail-with-body --silent --show-error -X POST -H "Authorization: Bearer $key" "$api/delete"
+                echo
+                echo "Deleted backend preview $name."
+                ;;
+              404)
+                echo "Backend preview $name is already gone."
+                ;;
+              *)
+                echo "::error::The Convex API answered $status for deployment $name."
+                exit 1
+                ;;
+            esac
           fi
 
           docker image rm "$IMAGE" 2>/dev/null || true

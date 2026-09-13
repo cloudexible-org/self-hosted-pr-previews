@@ -16,6 +16,33 @@ device:
 If the runners are offline on WSL2, check the keepalive task's last result in Task
 Scheduler ([01](01-host.md)).
 
+## Monitoring
+
+A preview host fails quietly: nobody notices a dead runner or a failing
+certificate renewal until a PR's preview doesn't appear. Each project carries
+[`templates/workflows/preview-health.yml`](../templates/workflows/preview-health.yml),
+which runs every six hours on **GitHub-hosted** runners — a check on the host
+can't report that the host is down — and fails when:
+
+- **a job has waited over 45 minutes for the self-hosted runner.** The daily
+  cleanup run in `preview.yml` guarantees there is a job to wait, even with no PR
+  activity.
+- **the project's wildcard certificate expires within 21 days.** Traefik renews at
+  30 days, so this means a week of failed renewals. Previews aren't reachable from
+  GitHub, so expiry comes from certificate-transparency logs (Cert Spotter's
+  public API).
+
+GitHub emails a failed scheduled run to whoever last edited that workflow's
+schedule. No tokens are involved: the repository's own `GITHUB_TOKEN` can read its
+runs' jobs, and neither check needs org-level runner permissions. Cost is a few
+minutes of hosted-runner time a month per project.
+
+**Verify:** run it once by hand (Actions → Preview health → Run workflow). To see
+it fail, stop a runner service for an hour and push to a PR.
+
+What it doesn't catch: a full disk, or a broken app inside a running container.
+The weekly prune ([03](03-docker.md)) handles the first; testers notice the second.
+
 ## Adding a project
 
 1. Add it to `config.yaml`.
@@ -43,7 +70,10 @@ cuts their access to every preview at once.
   are unreachable for the few seconds Traefik restarts; their containers keep
   running.
 - **Workflow actions:** Dependabot on each project keeps the action versions in
-  `preview.yml` current.
+  its copy of `preview.yml` current. In this repository, Dependabot covers the
+  dashboard's Go and base images, the proxy template's images and its own CI —
+  but not `templates/workflows/`, which it doesn't scan; bump those by hand when
+  a project's Dependabot bumps its copy.
 
 ## Disk
 
@@ -52,21 +82,16 @@ docker system df
 ```
 
 Build cache is pruned weekly by the timer ([03](03-docker.md)). Images of closed
-PRs are removed by teardown. If the host was down when a PR closed, the teardown
-job waits in the queue — GitHub drops queued jobs after 24 hours, which leaves an
-orphan. Find them:
+PRs are removed by teardown.
 
-```sh
-for c in $(docker ps -a --filter label=preview.pr --format '{{.Names}}'); do
-  repo=$(docker inspect -f '{{index .Config.Labels "preview.repo"}}' "$c")
-  pr=$(docker inspect -f '{{index .Config.Labels "preview.pr"}}' "$c")
-  state=$(gh pr view "$pr" --repo "$repo" --json state --jq .state)
-  [ "$state" = OPEN ] || echo "$c ($repo#$pr is $state)"
-done
-```
+If the host was down when a PR closed, its teardown job waits in the queue, and
+GitHub drops queued jobs after 24 hours. The daily run of `preview.yml` catches
+these: it lists the PR numbers that have an image or container on the host but
+aren't open, and runs the same teardown for each — container, backend preview,
+image. Trigger it by hand with Actions → Preview → Run workflow.
 
-Then re-run that PR's teardown job from its Actions run, which also deletes its
-backend preview — or remove the container and image by hand.
+A project whose workflow was deleted leaves its previews behind for good. Remove
+them by hand, backend previews included.
 
 ## Certificates
 
@@ -75,8 +100,9 @@ the `preview-host_letsencrypt` volume. Losing it isn't a disaster — they are
 issued again on demand — but don't delete it casually: Let's Encrypt allows 5
 identical certificates a week.
 
-Renewal fails silently if the DNS token expires or is revoked. Check Traefik's
-log after rotating it.
+Renewal fails silently on the host if the DNS token expires or is revoked;
+`preview-health.yml` reports it three weeks before expiry. Check Traefik's log
+after rotating the token anyway.
 
 ## Rotating credentials
 

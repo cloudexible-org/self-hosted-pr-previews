@@ -1,0 +1,33 @@
+version: 2
+updates:
+  # The dashboard's Go toolchain directive and (future) modules.
+  - package-ecosystem: gomod
+    directory: /apps/dashboard
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+
+  # The dashboard's build and runtime base images.
+  - package-ecosystem: docker
+    directory: /apps/dashboard
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+
+  # Traefik and the Docker socket proxy in the proxy template.
+  - package-ecosystem: docker-compose
+    directory: /templates/proxy
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: deps
+
+  # This repository's own CI. Dependabot doesn't scan templates/workflows/.
+  - package-ecosystem: github-actions
+    directory: /
+    schedule:
+      interval: weekly
+    commit-message:
+      prefix: ci

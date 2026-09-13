@@ -1,0 +1,83 @@
+name: Preview health
+
+# Checks from GitHub's own runners that previews keep working while nobody is
+# looking. A failed run emails whoever last changed the schedule below. It fails
+# when:
+#
+# - a job has waited over 45 minutes for the self-hosted runner, meaning the
+#   preview host is down or its runner service stopped. The daily cleanup in
+#   preview.yml guarantees there is always a job to notice this with.
+# - the project's wildcard certificate expires within 21 days. Traefik renews
+#   at 30, so renewal has been failing for over a week. Expiry is read from
+#   certificate-transparency logs, since previews aren't reachable from GitHub.
+#
+# These checks can't run on the self-hosted runner: a check there can't report
+# that its own host is down. Each run takes well under a minute of hosted-runner
+# time. Reference template — copy to `.github/workflows/preview-health.yml` next
+# to preview.yml; docs/12-operations.md explains it.
+on:
+  schedule:
+    - cron: "43 */6 * * *"
+  workflow_dispatch:
+
+permissions:
+  actions: read
+
+env:
+  # "*." + projects[].preview_domain
+  WILDCARD: "*.preview.myapp.com"
+
+jobs:
+  health:
+    name: check previews
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      # A run blocked by `concurrency` is `pending`, not `queued`, so only jobs
+      # actually waiting for a runner count.
+      - name: The self-hosted runner is picking up jobs
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cutoff="$(date -u -d '45 minutes ago' +%Y-%m-%dT%H:%M:%SZ)"
+          stuck=""
+          for status in queued in_progress; do
+            for run in $(gh api "repos/$GITHUB_REPOSITORY/actions/runs?status=$status&per_page=100" --jq '.workflow_runs[].id'); do
+              stuck+="$(gh api "repos/$GITHUB_REPOSITORY/actions/runs/$run/jobs" | jq -r --arg cutoff "$cutoff" '
+                .jobs[]
+                | select(.status == "queued" and (.labels | index("self-hosted")) and .created_at < $cutoff)
+                | "\(.name), queued since \(.created_at): \(.html_url)\n"')"
+            done
+          done
+          if [ -n "$stuck" ]; then
+            echo "::error::Jobs have waited over 45 minutes for the self-hosted runner. Is the preview host up, and its runner service running?"
+            printf '%s' "$stuck"
+            exit 1
+          fi
+          echo "No job is waiting on the self-hosted runner."
+
+      # Cert Spotter's public API needs no key at this rate. It returns
+      # issuances oldest first, a page at a time.
+      - name: The preview certificate is being renewed
+        run: |
+          domain="${WILDCARD#\*.}"
+          api="https://api.certspotter.com/v1/issuances?domain=$domain&include_subdomains=true&expand=dns_names"
+          issuances="[]"
+          url="$api"
+          while :; do
+            page="$(curl --fail-with-body --silent --show-error --retry 3 "$url")"
+            [ "$(jq length <<<"$page")" -gt 0 ] || break
+            issuances="$(jq -c --argjson page "$page" '. + $page' <<<"$issuances")"
+            url="$api&after=$(jq -r '.[-1].id' <<<"$page")"
+          done
+          not_after="$(jq -r --arg w "$WILDCARD" '[.[] | select(.dns_names | index($w)) | .not_after] | max // empty' <<<"$issuances")"
+          if [ -z "$not_after" ]; then
+            echo "::error::No certificate for $WILDCARD in certificate-transparency logs."
+            exit 1
+          fi
+          days=$(( ($(date -d "$not_after" +%s) - $(date +%s)) / 86400 ))
+          echo "$WILDCARD expires $not_after, in $days days."
+          if [ "$days" -lt 21 ]; then
+            echo "::error::$WILDCARD expires in $days days. Traefik renews at 30, so renewal is failing: check Traefik's log on the preview host (usually the DNS API token)."
+            exit 1
+          fi

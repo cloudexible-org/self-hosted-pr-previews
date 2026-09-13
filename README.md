@@ -77,9 +77,10 @@ config.example.yaml       every setup-specific value, in one place
 docs/                     runbooks 01–12, in order, plus pitfalls.md
 templates/host/           WSL, Docker, Tailscale and keepalive files
 templates/proxy/          Traefik + dashboard compose file
-templates/workflows/      a project's preview.yml
+templates/workflows/      a project's preview.yml and preview-health.yml
 apps/dashboard/           the preview dashboard (Go)
 articles/                 the story behind this setup
+.github/                  CI and Dependabot for this repository
 ```
 
 The longer story — why this exists and what went wrong along the way — is in

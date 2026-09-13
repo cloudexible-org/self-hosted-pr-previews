@@ -87,6 +87,22 @@ Docker 29's default driver.
 ([daemon.json](../templates/host/daemon.json)); it applies only to containers
 created afterwards.
 
+### A dead runner doesn't fail anything
+
+**Symptom:** the host has been down for a day and nothing told you. The PR's
+checks just say *Waiting for a runner*.
+
+**Why:** a job with no runner to take it stays queued — for up to 24 hours,
+after which GitHub drops it. No failure, so no email. A teardown dropped that
+way leaves a preview behind for good.
+
+**Fix:** [`preview-health.yml`](../templates/workflows/preview-health.yml) runs
+on GitHub-hosted runners and fails when a job has been queued for 45 minutes, and
+the daily run in `preview.yml` both gives it a job to watch and removes previews
+whose PR closed ([12](12-operations.md#monitoring)). The check has to be a
+workflow of its own: a scheduled run containing a stuck job doesn't finish — or
+email anyone — until GitHub drops that job.
+
 ## Network and certificates
 
 ### Tagged Tailscale devices aren't users

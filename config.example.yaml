@@ -89,6 +89,10 @@ projects:
       port: 3000
       # Values baked in at build time per PR (public URLs, public keys).
       build_args: [PUBLIC_APP_URL, PUBLIC_BACKEND_URL]
+      # Container limits, so one preview can't starve the host. A server-rendered
+      # app wants 1–2g; a static bundle behind Caddy or nginx fits in 256m.
+      memory: 1g
+      cpus: 1
     secrets:
       doppler:
         web: myapp_web                # runtime secrets for the container
